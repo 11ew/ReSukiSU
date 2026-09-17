@@ -1,47 +1,77 @@
 name: Build ReSukiSU Manager
 
 on:
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Set up JDK 21
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '21'
-        
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
-      
-    - name: Download and place libksud.so
-      run: |
-        # 从 ReSukiSU_CI 下载包含 libksud.so 的压缩包
-        curl -L -o ksud.zip https://github.com/cctv18/ReSukiSU_CI/releases/latest/download/ksud-aarch64-linux-android.zip
-        # 解压并创建目标目录
-        unzip ksud.zip
-        mkdir -p manager/app/src/main/jniLibs/arm64-v8a/
-        # 将 libksud.so 放到正确位置
-        find . -name "libksud.so" -exec cp {} manager/app/src/main/jniLibs/arm64-v8a/ \;
-        # 验证文件是否就位
-        ls -la manager/app/src/main/jniLibs/arm64-v8a/libksud.so
-        
-    - name: Grant execute permission for gradlew
-      run: chmod +x manager/gradlew
-      
-    - name: Build Release APK
-      run: |
-        cd manager
-        ./gradlew assembleRelease --no-daemon
-        
-    - name: Upload APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: ReSukiSU-Manager-APK
-        path: manager/app/build/outputs/apk/release/*.apk
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Android SDK packages
+        run: |
+          set -eu
+          export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n1)"
+          test -n "$SDKMANAGER"
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" \
+            "platforms;android-37" \
+            "build-tools;36.1.0" \
+            "ndk;29.0.14206865" \
+            "cmake;3.22.1" \
+            "platform-tools"
+          echo "sdk.dir=$ANDROID_HOME" > manager/local.properties
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Generate signing keystore
+        working-directory: manager
+        run: |
+          keytool -genkeypair \
+            -alias resukisu \
+            -keyalg RSA -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=ReSukiSU CI" \
+            -storetype JKS \
+            -keystore key.jks
+          {
+            echo KEYSTORE_FILE=key.jks
+            echo KEYSTORE_PASSWORD=android
+            echo KEY_ALIAS=resukisu
+            echo KEY_PASSWORD=android
+          } >> gradle.properties
+
+      - name: Verify native libs
+        run: |
+          ls -lh manager/app/src/main/jniLibs/arm64-v8a/
+          test -s manager/app/src/main/jniLibs/arm64-v8a/libksud.so
+          test -s manager/app/src/main/jniLibs/arm64-v8a/libghostlock.so
+
+      - name: Build Release APK
+        working-directory: manager
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReSukiSU-Manager-APK
+          path: manager/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
